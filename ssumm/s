@@ -1,0 +1,21 @@
+set -x
+
+
+
+
+
+python SSumM.py --data=email_eu  --k=${1}  --useNE=${2}  --NEmodel=${3}
+
+
+
+
+# ###################################
+
+# python SSumM.py --data=email_eu  --k=0.5  --useNE=1  --NEmodel=gcncd
+
+
+exit
+for x in $(seq 1 1 9)
+do
+python SSumM.py --dataPath=./dataset/fb.txt --k=0.${x} --useNE=${1}
+done
