@@ -4,7 +4,7 @@ if      [ ${1} = 'start' ]; then
     python 1.py
 
 elif      [ ${1} = '1' ]; then
-    python main.py -file   ../dataset/email_eu.txt       ${2}
+    python main.py -data ${2}       ${3}
 
 elif    [ ${1} = 't' ]; then
     tensorboard --logdir=/Users/shen/Desktop/log --port 8123 --host=127.0.0.1

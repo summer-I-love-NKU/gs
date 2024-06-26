@@ -1,15 +1,26 @@
+import argparse
+import csv
 import os
 from datetime import datetime
 import numpy as np
 import random
 from collections import defaultdict
 import math
+from scipy.spatial.distance import cosine
+from sklearn.metrics.pairwise import cosine_similarity
+# import heapq
+# https://blog.csdn.net/u011412768/article/details/86714540
+
 
 
 
 class MyRandom:
     def __init__(self):
-        self.seed
+        pass
+        # self.seed = None
+        # 如果写上这句，self.random.seed(self.random_seed)
+        # 就会把seed当作属性，不写的话，会进入seed方法，然后赋值seed属性
+        # 属性和方法最好别同名吧哈哈哈
 
     def seed(self, _seed):
         self.seed = _seed % 2147483647  # 确保种子在一个合适的范围内
@@ -28,11 +39,20 @@ class MyRandom:
 
 
 class SSumM:
-    def __init__(self, _dataPath: str, _outputfolder: str, _fracK: float, _random_seed: int, _use_fast_topndrop: int,
-                 urd: int):
+    def __init__(self, args):
 
-        self.debug = 0  # flag debug
+        self.debug = 1  # flag debug
         self.removed_node = []
+        self.useNE = args.useNE#note NEO 定义
+        self.NodeEmbedding = None
+        self.alpha = 0.5 if self.useNE else 0  # 节点相似性计算saving的权重
+        self.NodeEmbeddingPooling = 'avg'  # avg max min ...
+        self.NEmodel=args.NEmodel
+        self.uselazy = args.uselazy  # flag 暴力算法
+
+        self.use_label=args.use_label
+        self.NodeLabel=None
+
 
         self.numNodes = 0
         self.numEdges = 0
@@ -43,13 +63,16 @@ class SSumM:
         self.deg = []
         self.edges = None
         self.num4precision = 1e4
+        self.threshold_start=args.threshold_start
 
-        self.dataPath = _dataPath
-        self.dataset_name = _dataPath.split('/')[-1].split('\\')[-1][:-4]  # xxx.txt
-        self.outputfolder = _outputfolder
-        self.fracK = _fracK
-        self.random_seed = _random_seed
-        self.use_fast_topndrop = _use_fast_topndrop
+        # self.dataPath = args.dataPath
+        # self.dataset_name = args.dataPath.split('/')[-1].split('\\')[-1].split('.')[0]  # xxx.txt 1/111/1.py
+        self.dataset_name=args.data
+        self.dataPath='../dataset/'+self.dataset_name+'.edgelist'#attn datapath
+        self.outputfolder = args.out
+        self.fracK = args.fracK
+        self.random_seed = args.seed
+        self.use_fast_topndrop = args.use_fast_topndrop
 
         self.divThreshold = 500
         self.pair_used = np.zeros((self.divThreshold, self.divThreshold))
@@ -63,8 +86,64 @@ class SSumM:
         self.modelCost = []
         self.maxWeight = 1
 
-        self.random = MyRandom() if urd else random
+        self.random = MyRandom() if args.urd else random
         self.random.seed(self.random_seed)
+
+    def inputGraph(self):
+        print("Data Read Start: ", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+        # 得到 numNodes
+        cnt = 0
+        with open(self.dataPath, 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                parts = line.strip().split()
+                src, dst = map(int, parts[:2])
+                self.addNode(src)
+                self.addNode(dst)
+                cnt += 1
+        # 得到 numEdges
+        self.superGraph = [{} for _ in range(self.numNodes)]
+        self.edges = [0] * cnt
+        with open(self.dataPath, 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                parts = line.strip().split()
+                src, dst = map(int, parts[:2])
+                src, dst = self.node2Idx[src], self.node2Idx[dst]
+                self.superGraph[src][dst] = 1
+                self.superGraph[dst][src] = 1
+                self.edges[self.numEdges] = (src << 32) + dst
+                self.numEdges += 1
+
+        print("|V|: ", self.numNodes, "    |E|: ", self.numEdges)
+        # 超级节点相关
+        self.insideSupernode = [[i] for i in range(self.numNodes)]
+        self.rep = list(range(self.numNodes))
+        self.snList = list(range(self.numNodes))
+
+        self.numSuperNodes = self.numNodes
+        self.numSuperEdges = self.numEdges
+
+        self.maxWeight = 1
+        self.dataCost = [0.0] * self.numNodes
+        self.modelCost = list(map(len, self.superGraph))
+
+        self.targetSummarySize = self.fracK * 2 * self.numEdges * math.log2(self.numNodes)
+        print("Finished reading the input graph")
+
+        # note NEO 加载NodeEmbedding
+        if self.useNE:
+            if 0:
+                self.NodeEmbedding=np.ones((self.numNodes,10))
+                print("[ get test NodeEmbedding OK! ]")
+            else:
+                self.NodeEmbedding = np.load(f'output_emb/{self.dataset_name}_{self.NEmodel}.npy')
+                print(f"[ get NodeEmbedding:  {self.dataset_name}_{self.NEmodel}.npy   OK! ]")
+
+        if self.use_label:
+            self.NodeLabel=np.load('../dataset/'+self.dataset_name+'.label.npy')
+
 
     def deprint(self, *args, sep=' ', end='\n', file=None):
         if self.debug:
@@ -77,11 +156,11 @@ class SSumM:
         for m in range(1, T + 1):  # flag summarize
             print("iter:", m)
             if m != T:
-                threshold = 1.0 / (1 + m)
-                threshold = int(threshold * 1e6) / 1e6
+                threshold = 1.0 / (self.threshold_start + m)
             else:
                 threshold = 0
 
+            # self.random.seed(self.random_seed + m)  #
             sorted_shingle_list = self.signature_seed(k) if self.random_seed != -1 else self.signature(k)
 
             similar_node_set = self.divSupernode(sorted_shingle_list, k)
@@ -101,6 +180,72 @@ class SSumM:
                 self.topNDrop()
         end_time = datetime.now()
         return (end_time - start_time).seconds
+
+    def computeCost(self,length,tmp,superedgeCost):
+
+        bestSrc, bestDst, maxSaving = -1, -1, -1
+        if self.useNE:#note NEO 具体计算
+            embedding=self.NodeEmbedding[tmp[:length]]
+            similarity=cosine_similarity(embedding)
+            similarity-=np.identity(length)
+
+            # largest=heapq.nlargest(length,similarity.reshape(1,-1)[0])#因为会去重，所以这里可以多选一点
+            # largest=list(set(largest))# 去重
+            largest=sorted(list(set(similarity.reshape(1,-1)[0])),reverse=True)
+
+            try_num=0
+            for i in largest:
+                tmp_array=np.array(np.where(similarity==i)).T
+                tmp_array=tmp_array[:int(tmp_array.shape[0]/2)]
+                for _i,pair in enumerate( tmp_array ):# 这里应该是转置！！！不是reshape！！！！！！！！！！！！ #np.array(np.where(similarity==i)).reshape(-1,2):
+                    src,dst=pair#  src和dst不能相同！！！
+                    if src==dst:
+                        continue
+                    try_num+=1
+                    if try_num==length+1:
+                        return maxSaving, bestSrc, bestDst
+
+                    saving = self.savingMDL(tmp[src], tmp[dst], superedgeCost)
+                    if saving > maxSaving:
+                        maxSaving = saving
+                        bestSrc = src
+                        bestDst = dst
+
+        elif self.uselazy:
+            for i in range(length):
+                for j in range(i+1,length):
+                    src,dst=i,j
+                    saving = self.savingMDL(tmp[src], tmp[dst], superedgeCost)
+                    # self.deprint(saving)
+                    if saving > maxSaving:
+                        maxSaving = saving
+                        bestSrc = src
+                        bestDst = dst
+            return maxSaving, bestSrc, bestDst
+
+        else:
+            self.cntFlag += 1
+            uniqueValue = self.cntFlag
+            for i in range(length):
+                #  python的random的randint(0, n)是[0, n] java的Random的nextInt(n)是[0,n)
+                rn = self.random.randint(0, length * (length - 1) - 1)
+                src = rn // (length - 1)
+                dst = rn % (length - 1)
+                if src <= dst:
+                    dst += 1
+
+                if self.pair_used[src][dst] == uniqueValue:
+                    continue
+                else:
+                    self.pair_used[src][dst] = uniqueValue
+
+                saving = self.savingMDL(tmp[src], tmp[dst], superedgeCost)  # flag savingMDL
+                # self.deprint(saving)
+                if saving > maxSaving:
+                    maxSaving = saving
+                    bestSrc = src
+                    bestDst = dst
+        return maxSaving,bestSrc,bestDst
 
     def mergeStep(self, similar_node_set, threshold):
         superedgeCost = 2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)
@@ -128,29 +273,7 @@ class SSumM:
                 if length < 2:
                     break
 
-                self.cntFlag += 1
-                uniqueValue = self.cntFlag
-                bestSrc, bestDst, maxSaving = -1, -1, -1
-
-                for i in range(length):
-
-                    #  python的random的randint(0, n)是[0, n] java的Random的nextInt(n)是[0,n)
-                    rn = self.random.randint(0, length * (length - 1) - 1)
-                    src = rn // (length - 1)
-                    dst = rn % (length - 1)
-                    if src <= dst:
-                        dst += 1
-
-                    if self.pair_used[src][dst] == uniqueValue:
-                        continue
-                    else:
-                        self.pair_used[src][dst] = uniqueValue
-                    saving = self.savingMDL(tmp[src], tmp[dst], superedgeCost)  # flag savingMDL
-                    # self.deprint(saving)
-                    if saving > maxSaving:
-                        maxSaving = saving
-                        bestSrc = src
-                        bestDst = dst
+                maxSaving,bestSrc,bestDst=self.computeCost(length,tmp,superedgeCost)
 
                 if maxSaving < threshold:
                     numskip_patience += 1
@@ -227,48 +350,7 @@ class SSumM:
             idx = self.node2Idx[v]
         self.deg[idx] = self.deg[idx] + 1
 
-    def inputGraph(self):
-        print("Data Read Start: ", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-        # 得到 numNodes
-        cnt = 0
-        with open(self.dataPath, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                parts = line.strip().split()
-                src, dst = map(int, parts[:2])
-                self.addNode(src)
-                self.addNode(dst)
-                cnt += 1
-        # 得到 numEdges
-        self.superGraph = [{} for _ in range(self.numNodes)]
-        self.edges = [0] * cnt
-        with open(self.dataPath, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                parts = line.strip().split()
-                src, dst = map(int, parts[:2])
-                src, dst = self.node2Idx[src], self.node2Idx[dst]
-                self.superGraph[src][dst] = 1
-                self.superGraph[dst][src] = 1
-                self.edges[self.numEdges] = (src << 32) + dst
-                self.numEdges += 1
-
-        print("|V|: ", self.numNodes, "    |E|: ", self.numEdges)
-        # 超级节点相关
-        self.insideSupernode = [[i] for i in range(self.numNodes)]
-        self.rep = list(range(self.numNodes))
-        self.snList = list(range(self.numNodes))
-
-        self.numSuperNodes = self.numNodes
-        self.numSuperEdges = self.numEdges
-
-        self.maxWeight = 1
-        self.dataCost = [0.0] * self.numNodes
-        self.modelCost = list(map(len, self.superGraph))
-
-        self.targetSummarySize = self.fracK * 2 * self.numEdges * math.log2(self.numNodes)
-        print("Finished reading the input graph")
 
     def summarySave_initid(self):
         idx2Node = {v: k for k, v in self.node2Idx.items()}
@@ -407,11 +489,8 @@ class SSumM:
     def entropy(self, p):
         if (p == 0.0) or (p == 1.0):
             entropy = 0
-        else:
-            if p>=1:
-                aaaa=1
-                assert 0<p<1,'must be 0<p<1 !!!'
-
+        else:# attn todo 为什么v0版本 eu数据集 p==2？？？！！！
+            assert 0<p<1,'must 0<p<1 !!!'
             entropy = -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
         return entropy
 
@@ -446,7 +525,8 @@ class SSumM:
         tmpEdgeNum = self.superGraph[src].get(dst, 0) & 0x7FFFFFFF  # 这里很巧妙！！！
 
         if self.superGraph[src].get(dst,
-                                    0) > 0:  # if tmpEdgeNum > 0:#_attn 2024.1.4发现第3个bug：这里应该是 if(superGraph[src].get(dst,0) > 0)判断是否是sparse情况,因为这个值可能为负数！ 不能用tmpEdgeNum因为tmpEdgeNum一定是>=0的
+                                    0) > 0:  # if tmpEdgeNum > 0:#_attn 2024.1.4发现第3个bug：这里应该是 if(superGraph[
+            # src].get(dst,0) > 0)判断是否是sparse情况,因为这个值可能为负数！ 不能用tmpEdgeNum因为tmpEdgeNum一定是>=0的
             srcSize = len(self.insideSupernode[src])
             matrixSize = srcSize * (srcSize - 1 if src == dst else len(self.insideSupernode[dst]))
             # weight = tmpEdgeNum if matrixSize==0 else  tmpEdgeNum / matrixSize #  if matrixSize==0 ？不会的！
@@ -484,6 +564,14 @@ class SSumM:
         tmpMergeCost = dense if dense <= sparse else -sparse
 
         return tmpMergeCost
+
+    # node embedding operation :
+    # def embeddingSim(self, src, dst):  # flag savingEmbeddingSim
+    #     if not self.useNE:
+    #         return 0
+    #     # similarity = cosine_similarity([self.NodeEmbedding[src]],[self.NodeEmbedding[dst]])[0][0]
+    #     similarity = 1 - cosine(self.NodeEmbedding[src], self.NodeEmbedding[dst])
+    #     return similarity
 
     '''----------------------- 合并相关操作函数 ----------------------------'''
 
@@ -549,6 +637,16 @@ class SSumM:
         self.insideSupernode[src].extend(self.insideSupernode[dst])  # 列表extend！
         self.insideSupernode[dst] = []  # 这里不要 del self.insideSupernode[dst] 同样是为了保证insideSupernode维度不变
 
+        # note NEO  节点合并
+        # 其实其他节点Embedding用不到了
+        if self.useNE:
+            if self.NodeEmbeddingPooling == 'avg':
+                new_embedding = np.average(self.NodeEmbedding[self.insideSupernode[src]], axis=0)
+                self.NodeEmbedding[self.insideSupernode[src]] = new_embedding
+            else:
+                raise NotImplementedError('pooling')
+        # 最后其实不必管：self.NodeEmbedding[dst][:]=0
+
         merged_NodeSet.append(src)
         merged_NodeSet.sort()
         for n in merged_NodeSet:
@@ -581,6 +679,7 @@ class SSumM:
         self.snList.pop()
 
     def dropEdgesAndmergeIsolated(self):
+        print("---dropEdgesAndmergeIsolated---")
 
         # for (int n: snList){
         #     superGraph[n].int2IntEntrySet().removeIf(e -> (e.getIntValue() < 0));
@@ -606,8 +705,7 @@ class SSumM:
         raise NotImplementedError("topNDrop")
 
     def topNDrop_sort(self):
-        print("##### start topndrop_sort #####")
-        numE = nSize = blockSize = 0
+        print("---topndrop_sort---")
         cost = [0] * self.numSuperEdges
         sedges = [[0, 0] for _ in range(self.numSuperEdges)]
         col = 0
@@ -636,9 +734,12 @@ class SSumM:
             for i in range(edgeLft):
                 idx = indexes[i]
                 src, dst = sedges[idx]
-                # 这里是肯定存在的边，所以不用判断
+                # 这里是肯定存在的边，所以不用判断，但要注意自环！！！
                 del self.superGraph[src][dst]
-                del self.superGraph[dst][src]
+                try:
+                    del self.superGraph[dst][src]
+                except:
+                    pass
                 self.numSuperEdges -= 1
 
                 if not self.superGraph[src]:  # not {} 是返回True的
@@ -663,154 +764,90 @@ class SSumM:
             self.removeSuperNode(nodeId)
 
 
+class ReOne(SSumM):
+    def __init__(self, args):
+        super().__init__(args)
 
-# todo !!!
-class SSumMwithCommunityLabel:
-    def __init__(self, _dataPath: str, _outputfolder: str, _fracK: float, _random_seed: int, _use_fast_topndrop: int,
-                 urd: int):
+    def TotalCostPair_merge(self, src, dst, n):
+        source = self.superGraph[src]
+        dest = self.superGraph[dst]
 
-        self.debug = 0  # flag debug
-        self.removed_node = []
+        matrixSize = len(self.insideSupernode[src]) + len(self.insideSupernode[dst])
+        # 1 & 0x7FFFFFFF + 1
+        # Out[134]: 0
+        # (1 & 0x7FFFFFFF) + 1
+        # Out[135]: 2
+        if n == src:
+            tmpEdgeNum = ((source.get(src, 0) & 0x7FFF_FFFF) + 2 * (source.get(dst, 0) & 0x7FFF_FFFF) + (
+                    dest.get(dst, 0) & 0x7FFF_FFFF)) // 2
+            matrixSize = matrixSize * (matrixSize - 1) // 2
+        else:
+            tmpEdgeNum = (source.get(n, 0) & 0x7FFF_FFFF) + (dest.get(n, 0) & 0x7FFF_FFFF)
+            matrixSize *= len(self.insideSupernode[n])
 
-        self.numNodes = 0
-        self.numEdges = 0
-        self.numSuperNodes = 0
-        self.numSuperEdges = 0
-        self.targetSummarySize = 0
-        self.node2Idx = defaultdict(int)
-        self.deg = []
-        self.edges = None
-        self.num4precision = 1e4
+        weight = tmpEdgeNum / matrixSize
 
-        self.dataPath = _dataPath
-        self.dataset_name = _dataPath.split('/')[-1].split('\\')[-1][:-4]  # xxx.txt
-        self.outputfolder = _outputfolder
-        self.fracK = _fracK
-        self.random_seed = _random_seed
-        self.use_fast_topndrop = _use_fast_topndrop
+        #rareDrop???
+        if weight<0.5:
+            return -2*math.log2(self.numNodes)*tmpEdgeNum
 
-        self.divThreshold = 500
-        self.pair_used = np.zeros((self.divThreshold, self.divThreshold))
-        self.cntFlag = 0
-        self.isolatedId = -1
-        self.superGraph = None
-        self.insideSupernode = defaultdict(list)
-        self.snList = []
-        self.rep = []
-        self.dataCost = []
-        self.modelCost = []
-        self.maxWeight = 1
+        dense = 2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight) + self.entropy(weight) * matrixSize
 
-        self.random = MyRandom() if urd else random
-        self.random.seed(self.random_seed)
+        sparse = 2 * math.log2(self.numNodes) * tmpEdgeNum
+        tmpMergeCost = dense if dense <= sparse else -sparse
 
-    def deprint(self, *args, sep=' ', end='\n', file=None):
-        if self.debug:
-            print(*args, sep=' ', end='\n', file=None)
+        return tmpMergeCost
 
-    def Summarize(self, T, k):
-        print("Start Time: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        start_time = datetime.now()
+    def topNDrop_sort(self):
+        print("---start topndrop_sort RE1---")
+        numE = nSize = blockSize = 0
+        cost = [0] * self.numSuperEdges
+        sedges = [[0, 0] for _ in range(self.numSuperEdges)]
+        col = 0
 
-        for m in range(1, T + 1):  # flag summarize
-            print("iter:", m)
-            if m != T:
-                threshold = 1.0 / (1 + m)
-                threshold = int(threshold * 1e6) / 1e6
-            else:
-                threshold = 0
+        for n in self.snList:
+            for e in self.superGraph[n].items():
+                if e[0] >= n:
+                    numE = e[1] // (2 if e[0] == n else 1)
+                    nSize = len(self.insideSupernode[n])
+                    blockSize = nSize * ((nSize - 1) if (e[0] == n) else len(self.insideSupernode[e[0]]))
+                    cost[col] = ( numE * 2 / blockSize -1 ) * numE
+                    sedges[col][0] = n
+                    sedges[col][1] = e[0]
+                    col += 1
 
-            sorted_shingle_list = self.signature_seed(k) if self.random_seed != -1 else self.signature(k)
+        summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
+                2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight))
 
-            similar_node_set = self.divSupernode(sorted_shingle_list, k)
+        while summarySize > self.targetSummarySize:
+            edgeLft = self.numSuperEdges + int(
+                (self.numNodes * math.log2(self.numSuperNodes) - self.targetSummarySize) / (
+                        2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)))
 
-            check = self.mergeStep(similar_node_set, threshold)
+            indexes = sorted(list(range(len(cost))), key=lambda k: cost[k])
 
-            if check == 0:
-                break
-        # summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight));print(summarySize / self.targetSummarySize, summarySize / self.targetSummarySize * self.fracK)
-        self.dropEdgesAndmergeIsolated()
-        # summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight));print(summarySize / self.targetSummarySize, summarySize / self.targetSummarySize * self.fracK)
-        if self.targetSummarySize < self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
-                2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)):
-            if self.use_fast_topndrop == 0:
-                self.topNDrop_sort()
-            else:
-                self.topNDrop()
-        end_time = datetime.now()
-        return (end_time - start_time).seconds
+            for i in range(edgeLft):
+                idx = indexes[i]
+                src, dst = sedges[idx]
+                # 这里是肯定存在的边，所以不用判断
+                del self.superGraph[src][dst]
+                try:
+                    del self.superGraph[dst][src]
+                except:
+                    pass
+                self.numSuperEdges -= 1
 
-    def mergeStep(self, similar_node_set, threshold):
-        superedgeCost = 2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)
-        for _i, tmp in enumerate(similar_node_set):
-            ###############################
-            # 错误代码案例！！！
-            # if len(tmp) < 2:
-            #     continue
-            #
-            # numskip_patience = 0
-            # while numskip_patience < max(math.log2(len(tmp)), 1):
-            #     length = len(tmp)
-            ###############################
+                if not self.superGraph[src]:  # not {} 是返回True的
+                    self.mergeAndRemove(src)
 
-            # 正确的是这样：length是在开始定义的！！！  _attn 2023.1.3 第0个bug（和第2个bug是一处区域）
-            # 而且后面：max(math.log2(length), 1)必须用length而不是len(tmp)
-            length = len(tmp)
-            if length < 2:
-                continue
+                if src != dst and not self.superGraph[dst]:
+                    self.mergeAndRemove(dst)
 
-            numskip_patience = 0  # flag mergeStep
-            while numskip_patience < max(math.log2(length),
-                                         1):  # _attn 2024.1.4发现第2个bug，这里也要改成length，必须用length而不是len(tmp)！因为tmp不会真的删除元素，只是把length缩减了！！！#while numskip_patience < max(math.log2(len(tmp)), 1):
-
-                if length < 2:
-                    break
-
-                self.cntFlag += 1
-                uniqueValue = self.cntFlag
-                bestSrc, bestDst, maxSaving = -1, -1, -1
-
-                for i in range(length):
-
-                    #  python的random的randint(0, n)是[0, n] java的Random的nextInt(n)是[0,n)
-                    rn = self.random.randint(0, length * (length - 1) - 1)
-                    src = rn // (length - 1)
-                    dst = rn % (length - 1)
-                    if src <= dst:
-                        dst += 1
-
-                    if self.pair_used[src][dst] == uniqueValue:
-                        continue
-                    else:
-                        self.pair_used[src][dst] = uniqueValue
-                    saving = self.savingMDL(tmp[src], tmp[dst], superedgeCost)  # flag savingMDL
-                    # self.deprint(saving)
-                    if saving > maxSaving:
-                        maxSaving = saving
-                        bestSrc = src
-                        bestDst = dst
-
-                if maxSaving < threshold:
-                    numskip_patience += 1
-                    continue
-
-                numskip_patience = 0
-                self.merge(tmp[bestSrc], tmp[bestDst])
-
-                length -= 1
-                tmp[bestDst] = tmp[length]
-
-                # Update variables
-                superedgeCost = 2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)
-                summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
-                            2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight))
                 summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
                         2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight))
-                # print("###",summarySize / self.targetSummarySize, summarySize / self.targetSummarySize * self.fracK)
-                # 当 summarySize <= self.targetSummarySize 时候结束，但最后summarySize会比实际要求的小一些，因为需要删除虚拟边，合并孤立节点
+
                 if summarySize <= self.targetSummarySize:
-                    return 0
-        return 1  # Not successful, needs to continue merging
+                    break
 
     def norm(self):
         su = [0] * self.numNodes
@@ -833,471 +870,18 @@ class SSumMwithCommunityLabel:
             sz = len(self.insideSupernode[u])
             sz *= (len(self.insideSupernode[u]) - 1) if u == v else len(self.insideSupernode[v])
             w = edgeCnt / sz
-            err += ((1 - w) * (1 - w) - w * w)
+            err += (1-2*w)
 
         err *= 2
         for v in self.snList:
             for u in self.superGraph[v]:
-                sz = len(self.insideSupernode[u])
-                sz *= len(self.insideSupernode[u]) if u == v else len(self.insideSupernode[v])
                 edgeCnt = self.superGraph[v][u]
-                w = edgeCnt / sz
-                err += (w * w * sz)
+                err += edgeCnt
 
-        err = np.sqrt(err)
         return err, err / self.numNodes / (self.numNodes - 1)
 
-    ''' -------------------------- 基本函数 ---------------------------'''
 
-    # def log2(self,x):
-    #     return math.log(x) / self.log2num
 
-    def CutPrecision(self, x):
-        return ((int)(x * self.num4precision)) / self.num4precision
 
-    def addNode(self, v):
-        if v not in self.node2Idx:
-            self.node2Idx[v] = self.numNodes
-            idx = self.numNodes
-            self.deg.append(0)
-            self.numNodes += 1
-        else:
-            idx = self.node2Idx[v]
-        self.deg[idx] = self.deg[idx] + 1
-
-    def inputGraph(self):
-        print("Data Read Start: ", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-        # 得到 numNodes
-        cnt = 0
-        with open(self.dataPath, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                parts = line.strip().split()
-                src, dst = map(int, parts[:2])
-                self.addNode(src)
-                self.addNode(dst)
-                cnt += 1
-        # 得到 numEdges
-        self.superGraph = [{} for _ in range(self.numNodes)]
-        self.edges = [0] * cnt
-        with open(self.dataPath, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                parts = line.strip().split()
-                src, dst = map(int, parts[:2])
-                src, dst = self.node2Idx[src], self.node2Idx[dst]
-                self.superGraph[src][dst] = 1
-                self.superGraph[dst][src] = 1
-                self.edges[self.numEdges] = (src << 32) + dst
-                self.numEdges += 1
-
-        print("|V|: ", self.numNodes, "    |E|: ", self.numEdges)
-        # 超级节点相关
-        self.insideSupernode = [[i] for i in range(self.numNodes)]
-        self.rep = list(range(self.numNodes))
-        self.snList = list(range(self.numNodes))
-
-        self.numSuperNodes = self.numNodes
-        self.numSuperEdges = self.numEdges
-
-        self.maxWeight = 1
-        self.dataCost = [0.0] * self.numNodes
-        self.modelCost = list(map(len, self.superGraph))
-
-        self.targetSummarySize = self.fracK * 2 * self.numEdges * math.log2(self.numNodes)
-        print("Finished reading the input graph")
-
-    def summarySave_initid(self):
-        idx2Node = {v: k for k, v in self.node2Idx.items()}
-
-        output_folder = self.outputfolder + self.dataset_name + '/'
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder, exist_ok=True)
-
-        filename = f"{self.dataset_name}_{self.fracK}.snlist"
-        with open(output_folder + filename, 'w') as f:
-            for sup_v in self.snList:
-                line = str(idx2Node[sup_v]) + '\t' + '\t'.join(
-                    str(idx2Node[sub_v]) for sub_v in self.insideSupernode[sup_v])
-                print(line, file=f)
-
-        filename = f"{self.dataset_name}_{self.fracK}.suedge"
-        with open(output_folder + filename, 'w') as f:
-            for sup_v in self.snList:
-                for neighbor_v in self.superGraph[sup_v].keys():
-                    if sup_v >= neighbor_v:
-                        weight = self.superGraph[sup_v][neighbor_v]
-                        # Why are there many? sup_v == neighbor_v
-                        line_weight = weight // 2 if sup_v == neighbor_v else weight
-                        line = f"{idx2Node[sup_v]}\t{idx2Node[neighbor_v]}\t{line_weight}"
-                        print(line, file=f)
-
-    def summarySave_newidx(self):
-        raise NotImplementedError("summarySave_newidx")
-
-    '''--------------------节点相似性计算和合并节点的函数 ---------------------'''
-
-    def getRandomPermutation(self, length):
-        # 用randint 而不是 shuffle ，因为可以用种子控制
-        array = list(range(length))
-        for i in range(length):
-            ran = i + self.random.randint(0, length - i - 1)  # python的random.randint和java的random.nextInt不一样！
-            array[i], array[ran] = array[ran], array[i]
-        return array
-
-    def signature_seed(self, k):
-        res_ans = np.zeros((self.numSuperNodes, k + 1), dtype=int)
-
-        for res_i in range(k):
-            ans = np.zeros(self.numNodes, dtype=int)
-            superAns = np.zeros(self.numSuperNodes, dtype=int)
-            f_hash_value = self.getRandomPermutation(self.numNodes)
-
-            ans[:] = f_hash_value  # ans=f_hash_value的话ans就成为list了
-            for e in self.edges:
-                src = e >> 32
-                dst = e & 0x7FFFFFFF
-                ans[src] = min(f_hash_value[dst], ans[src])
-                ans[dst] = min(f_hash_value[src], ans[dst])
-
-            superAns[:] = 0x7FFFFFFF
-            for i in range(self.numSuperNodes):
-                # // snList 存储了超级节点的原始id！！！
-                supernode = self.snList[i]
-                superAns[i] = min([ans[j] for j in self.insideSupernode[supernode]])
-
-            res_ans[:, res_i] = superAns  # 对！
-        res_ans[:, k] = np.array(self.snList)
-
-        # 错误的：但这是啥意思 sorted_array = res_ans[res_ans[:, :k].argsort(kind='mergesort')]
-        # 正确的：
-        # array([[10., 3., 2.],
-        #        [10., 4., 3.],
-        #        [0., 5., 1.],
-        #        [20., 5., 4.],
-        #        [0., 4., 0.]])
-        # array([[0., 4., 0.],
-        #        [0., 5., 1.],
-        #        [10., 3., 2.],
-        #        [10., 4., 3.],
-        #        [20., 5., 4.]])
-        sorted_array = np.array(sorted(res_ans, key=lambda x: tuple(x)))
-        return sorted_array
-
-    def signature(self, k):
-        raise NotImplementedError("signature with multi thread")
-
-    def listN(self, array, first):
-        ans = []
-        tmp = array[0]
-        last = first - 1
-
-        for i in range(len(array)):
-            if tmp == array[i]:
-                last += 1
-            else:
-                model = [first, last]
-                ans.append(model)
-                tmp = array[i]
-                first = last + 1
-                last += 1
-
-        model = [first, last]
-        ans.append(model)
-
-        return ans
-
-    def get_column_element(self, array, col_index, first, last):
-        ans = [array[i][col_index] for i in range(first, last + 1)]
-        return ans
-
-    def divSupernode(self, sorted_shingle_list, k):
-        shingle_value = [sorted_shingle_list[i][0] for i in range(self.numSuperNodes)]
-        continue_samenum_idx = self.listN(shingle_value, 0)
-        return self.recursiveDiv(sorted_shingle_list, continue_samenum_idx, 0, k)
-
-    def recursiveDiv(self, sorted_shingle_list, continue_samenum_idx, col, k):
-        ans = []
-        for x in continue_samenum_idx:
-            first = x[0]
-            last = x[1]
-            length = last - first + 1
-            if length <= self.divThreshold:
-                ans.append(self.get_column_element(sorted_shingle_list, k, first, last))
-            else:
-                if col < k:
-                    col += 1
-                    t_next_shingle = self.get_column_element(sorted_shingle_list, col, first, last)
-                    new_continue_samenum_idx = self.listN(t_next_shingle, first)
-                    ans.extend(self.recursiveDiv(sorted_shingle_list, new_continue_samenum_idx, col, k))
-                    col -= 1
-                elif col == k:
-                    while first + self.divThreshold - 1 < last:
-                        ans.append(
-                            self.get_column_element(sorted_shingle_list, k, first, first + self.divThreshold - 1))
-                        first += self.divThreshold
-                    ans.append(self.get_column_element(sorted_shingle_list, k, first, first + self.divThreshold - 1))
-        return ans
-
-    ''' ---------------------------- 代价计算函数 ---------------------------'''
-
-    def entropy(self, p):
-        if (p == 0.0) or (p == 1.0):
-            entropy = 0
-        else:
-            if p>=1:
-                aaaa=1
-                assert 0<p<1,'must be 0<p<1 !!!'
-
-            entropy = -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
-        return entropy
-
-    def savingMDL(self, src, dst, edgeCost):
-        tmpModelCost = edgeCost * (self.modelCost[src] + self.modelCost[dst])
-        tmpDataCost = self.dataCost[src] + self.dataCost[dst]
-        # 善用 dict 的 get， 和 java的getOrdefault一样，java的get找不到是0，而python是None
-        tmpModelCost -= edgeCost if self.superGraph[src].get(dst, 0) > 0 else 0
-        tmpDataCost -= self.dataCostPair(src, dst)
-        denominator = tmpModelCost + tmpDataCost
-
-        merged_nodeset = self.mergeNodeSet(src, dst)
-
-        tmpMergeCost = 0
-        for n in merged_nodeset:
-            tmpData = self.TotalCostPair_merge(src, dst, n)
-            tmpMergeCost += -tmpData if tmpData < 0 else tmpData
-        # if denominator==0:??? 不会的！
-        res = 1 - (tmpMergeCost / denominator)
-        res = self.CutPrecision(res)  # _attn 控制位数 只在这里用一次 2024.1.5凌晨 第5个bug，其实不算bug，是精度问题
-        return res
-
-    def mergeNodeSet(self, src, dst):
-        returnSet = set(self.superGraph[src].keys()) | set(self.superGraph[dst].keys())
-        if dst in returnSet:
-            returnSet.add(src)
-            returnSet.remove(dst)
-        return sorted(returnSet)  # 有序
-
-    def dataCostPair(self, src, dst):
-
-        tmpEdgeNum = self.superGraph[src].get(dst, 0) & 0x7FFFFFFF  # 这里很巧妙！！！
-
-        if self.superGraph[src].get(dst,
-                                    0) > 0:  # if tmpEdgeNum > 0:#_attn 2024.1.4发现第3个bug：这里应该是 if(superGraph[src].get(dst,0) > 0)判断是否是sparse情况,因为这个值可能为负数！ 不能用tmpEdgeNum因为tmpEdgeNum一定是>=0的
-            srcSize = len(self.insideSupernode[src])
-            matrixSize = srcSize * (srcSize - 1 if src == dst else len(self.insideSupernode[dst]))
-            # weight = tmpEdgeNum if matrixSize==0 else  tmpEdgeNum / matrixSize #  if matrixSize==0 ？不会的！
-            weight = tmpEdgeNum / matrixSize
-            tmpDataCost = self.entropy(weight) * matrixSize
-        else:
-            tmpDataCost = 2 * math.log2(self.numNodes) * tmpEdgeNum
-        if src == dst:
-            tmpDataCost /= 2
-        return tmpDataCost
-
-    def TotalCostPair_merge(self, src, dst, n):
-        source = self.superGraph[src]
-        dest = self.superGraph[dst]
-
-        matrixSize = len(self.insideSupernode[src]) + len(self.insideSupernode[dst])
-        # 1 & 0x7FFFFFFF + 1
-        # Out[134]: 0
-        # (1 & 0x7FFFFFFF) + 1
-        # Out[135]: 2
-        if n == src:
-            tmpEdgeNum = ((source.get(src, 0) & 0x7FFF_FFFF) + 2 * (source.get(dst, 0) & 0x7FFF_FFFF) + (
-                        dest.get(dst, 0) & 0x7FFF_FFFF)) // 2
-            matrixSize = matrixSize * (matrixSize - 1) // 2
-        else:
-            tmpEdgeNum = (source.get(n, 0) & 0x7FFF_FFFF) + (dest.get(n, 0) & 0x7FFF_FFFF)
-            matrixSize *= len(self.insideSupernode[n])
-
-        weight = tmpEdgeNum / matrixSize
-
-        # dense = 2 * math.log2(self.numNodes) + math.log2(self.maxWeight) + self.entropy(weight) * matrixSize#_attn 2023.1.4第1个bug（哦是2024年了）逐行debug比对java和python结果差异，发现了这个bug:numNodes应该改成numSuperNodes，python代码是用gpt4生成之后再修改的，检查的不仔细啊！感谢自己的完美主义、严谨、精益求精、刨根问底、求是精神，慢就是快！
-        dense = 2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight) + self.entropy(weight) * matrixSize
-
-        sparse = 2 * math.log2(self.numNodes) * tmpEdgeNum
-        tmpMergeCost = dense if dense <= sparse else -sparse
-
-        return tmpMergeCost
-
-    '''----------------------- 合并相关操作函数 ----------------------------'''
-
-    def merge(self, src, dst):
-        tmpMax = 0
-        source = self.superGraph[src]
-        dest = self.superGraph[dst]
-
-        merged_NodeSet = self.mergeNodeSet(src, dst)
-
-        for n in merged_NodeSet:
-            denseNum = 0
-            if n == src:
-                tmpEdgeNum = (source.get(src, 0) & 0x7FFF_FFFF) + 2 * (source.get(dst, 0) & 0x7FFF_FFFF) + (
-                            dest.get(dst, 0) & 0x7FFF_FFFF)
-                if source.get(src, 0) > 0:
-                    denseNum += 1
-                if source.get(dst, 0) > 0:
-                    denseNum += 1
-                if dest.get(dst,
-                            0) > 0:  # _attn 2023.1.4 第4个bug 看到删除159个节点后，numSuperEdges不一样！导致summarySize不一样，而涉及到它的写入，一处是numSuperEdges -= (denseNum - 1);另一处是dropEdgesAndmergeIsolated那里，猜测 大概率与 denseNum有关，终于发现这里的粗心，是dest.get(dst,0)而不是dest.get(src,0)！！！
-                    denseNum += 1
-            else:
-                tmpEdgeNum = (source.get(n, 0) & 0x7FFF_FFFF) + (dest.get(n, 0) & 0x7FFF_FFFF)
-            tmpMax = max(tmpMax, tmpEdgeNum)
-
-            if n != src:
-                dataTmp = self.dataCost[n] - (self.dataCostPair(src, n) + self.dataCostPair(dst, n))
-                modelTmp = self.modelCost[n]
-                if self.superGraph[src].get(n, 0) > 0:
-                    modelTmp -= 1
-                    denseNum += 1
-                if self.superGraph[dst].get(n, 0) > 0:
-                    modelTmp -= 1
-                    denseNum += 1
-
-                self.dataCost[n] = dataTmp
-                self.modelCost[n] = modelTmp
-
-            tmpMergeCost = self.TotalCostPair_merge(src, dst, n)
-            if tmpMergeCost >= 0:
-                self.numSuperEdges -= (denseNum - 1)
-                self.modelCost[n] += 1
-            else:
-                self.numSuperEdges -= denseNum
-                # // Java里：按位或， 变成负数了！！！！
-                # tmpEdgeNum |= 0x80000000;
-                # python按位或需要这样
-                tmpEdgeNum = (tmpEdgeNum | 0x8000_0000) - 0x1_0000_0000
-
-            # Update src tmpEdgeNum
-            self.superGraph[src][n] = tmpEdgeNum
-            self.superGraph[n][src] = tmpEdgeNum
-            # java这里是superGraph[n].remove(dst) 返回值是value（存在）或者0（不存在）， n有可能是src的邻居而不是dst的邻居，所以superGraph[n][dst]可能不存在！
-            #  需要先判断，而不是del self.superGraph[n][dst]
-            if dst in self.superGraph[n]:
-                del self.superGraph[n][dst]
-
-        if tmpMax > self.maxWeight:
-            self.maxWeight = tmpMax
-
-        self.superGraph[dst] = None  # del self.superGraph[dst]#不要del 要保证superGraph维度不变！！！
-        self.insideSupernode[src].extend(self.insideSupernode[dst])  # 列表extend！
-        self.insideSupernode[dst] = []  # 这里不要 del self.insideSupernode[dst] 同样是为了保证insideSupernode维度不变
-
-        merged_NodeSet.append(src)
-        merged_NodeSet.sort()
-        for n in merged_NodeSet:
-            if n == src:
-                tmpDataCost = 0
-                tmpModelCost = 0
-                for m in self.superGraph[src].keys():
-                    tmpDataCost += self.dataCostPair(src, m)
-                    tmpModelCost += 1 if self.superGraph[src].get(m, 0) > 0 else 0
-                self.dataCost[src] = tmpDataCost
-                self.modelCost[src] = tmpModelCost
-            else:
-                self.dataCost[n] += self.dataCostPair(src, n)
-        self.dataCost[dst] = 0
-        self.modelCost[dst] = 0
-        self.removeSuperNode(dst)
-
-    def removeSuperNode(self, target):
-        # self.deprint('remove',target)
-        # if self.debug:
-        #     self.removed_node.append(target)
-
-        self.numSuperNodes -= 1
-        last_node = self.snList[self.numSuperNodes]
-        delete_node_idx = self.rep[target]
-
-        self.snList[delete_node_idx] = last_node
-        self.rep[last_node] = self.rep[target]
-        self.rep[target] = -1
-        self.snList.pop()
-
-    def dropEdgesAndmergeIsolated(self):
-
-        # for (int n: snList){
-        #     superGraph[n].int2IntEntrySet().removeIf(e -> (e.getIntValue() < 0));
-        # }
-        for n in self.snList:
-            self.superGraph[n] = {k: v for k, v in self.superGraph[n].items() if v >= 0}
-
-        i = 0
-        while i < len(self.snList):
-            target = self.snList[i]
-            i += 1
-            if len(self.superGraph[target]) == 0:  # //if(superGraph[target].size() == 0) {
-                if self.isolatedId == -1:
-                    self.isolatedId = target
-                else:
-                    self.insideSupernode[self.isolatedId].extend(self.insideSupernode[target])
-                    self.superGraph[target] = None
-                    self.insideSupernode[target] = []
-                    self.removeSuperNode(target)
-                    i -= 1
-
-    def topNDrop(self):
-        raise NotImplementedError("topNDrop")
-
-    def topNDrop_sort(self):
-        print("##### start topndrop_sort #####")
-        numE = nSize = blockSize = 0
-        cost = [0] * self.numSuperEdges
-        sedges = [[0, 0] for _ in range(self.numSuperEdges)]
-        col = 0
-
-        for n in self.snList:
-            for e in self.superGraph[n].items():
-                if e[0] >= n:
-                    numE = e[1] // (2 if e[0] == n else 1)
-                    nSize = len(self.insideSupernode[n])
-                    blockSize = nSize * ((nSize - 1) if (e[0] == n) else len(self.insideSupernode[e[0]]))
-                    cost[col] = numE * numE / blockSize
-                    sedges[col][0] = n
-                    sedges[col][1] = e[0]
-                    col += 1
-
-        summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
-                2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight))
-
-        while summarySize > self.targetSummarySize:
-            edgeLft = self.numSuperEdges + int(
-                (self.numNodes * math.log2(self.numSuperNodes) - self.targetSummarySize) / (
-                        2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight)))
-
-            indexes = sorted(list(range(len(cost))), key=lambda k: cost[k])
-
-            for i in range(edgeLft):
-                idx = indexes[i]
-                src, dst = sedges[idx]
-                # 这里是肯定存在的边，所以不用判断
-                del self.superGraph[src][dst]
-                del self.superGraph[dst][src]
-                self.numSuperEdges -= 1
-
-                if not self.superGraph[src]:  # not {} 是返回True的
-                    self.mergeAndRemove(src)
-
-                if src != dst and not self.superGraph[dst]:
-                    self.mergeAndRemove(dst)
-
-                summarySize = self.numNodes * math.log2(self.numSuperNodes) + self.numSuperEdges * (
-                        2 * math.log2(self.numSuperNodes) + math.log2(self.maxWeight))
-
-                if summarySize <= self.targetSummarySize:
-                    break
-
-    def mergeAndRemove(self, nodeId):
-        if self.isolatedId == -1 or self.isolatedId == nodeId:
-            self.isolatedId = nodeId
-        else:
-            self.insideSupernode[self.isolatedId].extend(self.insideSupernode[nodeId])
-            self.superGraph[nodeId] = None
-            self.insideSupernode[nodeId] = []
-            self.removeSuperNode(nodeId)
 
 
