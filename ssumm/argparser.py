@@ -6,7 +6,7 @@ def parse_args():  # flag args
 
     general = parser.add_argument_group(title='general')
     general.add_argument('-file', type=str, default='../dataset/ka.txt', help='input file')
-    general.add_argument('-out', type=str, default='./output/', help='output folder')
+    general.add_argument('-out', type=str, default='../result/', help='output folder')
     general.add_argument('-k', type=float, default=0.8, help='fracK')
     general.add_argument('-re', type=int, default=2, help='compute reconstruction error, RE1 or RE2 ?')
     general.add_argument('-seed', type=int, default=2023, help='random seed')

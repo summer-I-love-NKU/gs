@@ -1,6 +1,9 @@
 from argparser import parse_args
-from SSumM import SSumM
+from SSumM import SSumM,SSumMwithCommunityLabel
 import math
+
+model=SSumMwithCommunityLabel
+
 
 def main():
     args = parse_args()
@@ -12,7 +15,7 @@ def main():
         raise NotImplementedError("ReOne Class")
         # graph = ReOne(dataPath, outputfolder, fracK, seed, use_fast_topndrop)
     else:
-        graph = SSumM(dataPath, args.out, fracK, args.seed, args.use_fast_topndrop, args.urd)
+        graph = model(dataPath, args.out, fracK, args.seed, args.use_fast_topndrop, args.urd)
     graph.inputGraph()
     elapsTime = graph.Summarize(args.T, args.cals)
     if args.sidx == 0:
