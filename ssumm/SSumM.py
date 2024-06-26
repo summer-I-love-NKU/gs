@@ -1,4 +1,3 @@
-import argparse
 import os
 from datetime import datetime
 import numpy as np
@@ -6,8 +5,6 @@ import random
 from collections import defaultdict
 import math
 
-
-# v0 python版本的SSumM，已经检查无误
 
 
 class MyRandom:
@@ -32,7 +29,7 @@ class MyRandom:
 
 class SSumM:
     def __init__(self, _dataPath: str, _outputfolder: str, _fracK: float, _random_seed: int, _use_fast_topndrop: int,
-                 urd: int, useNE: int):
+                 urd: int):
 
         self.debug = 0  # flag debug
         self.removed_node = []
@@ -411,6 +408,10 @@ class SSumM:
         if (p == 0.0) or (p == 1.0):
             entropy = 0
         else:
+            if p>=1:
+                aaaa=1
+                assert 0<p<1,'must be 0<p<1 !!!'
+
             entropy = -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
         return entropy
 
@@ -662,73 +663,7 @@ class SSumM:
             self.removeSuperNode(nodeId)
 
 
-def parse_args():  # flag args
-    parser = argparse.ArgumentParser()
-
-    general = parser.add_argument_group(title='general')
-    general.add_argument('--file', type=str, default='', help='input file')
-    general.add_argument('--out', type=str, default='./output/', help='output folder')
-    general.add_argument('--k', type=float, default=0.8, help='fracK')
-    general.add_argument('--re', type=int, default=2, help='compute reconstruction error, RE1 or RE2 ?')
-    general.add_argument('--seed', type=int, default=2023, help='random seed')
-    general.add_argument('--use_fast_topndrop', type=int, default=0,
-                         help='use_fast_topndrop with median search (use_fast_topndrop=1) or just sort ('
-                              'use_fast_topndrop=0) ?')
-    general.add_argument('--sidx', type=int, default=0,
-                         help='save result with new index (sidx=1) or initial node id (sidx=0) ?')
-    general.add_argument('--T', type=int, default=20,
-                         help='number of iteration')
-    general.add_argument('--cals', type=int, default=10,
-                         help='How many times do we calculate shingle?')
-    general.add_argument('--urd', type=int, default=0,
-                         help='user defined random function')
-    general.add_argument('--tf', type=str, default="", help='test:input file')
-    general.add_argument('--tk', type=float, default=2.0, help='test:fracK')
-
-    args, _ = parser.parse_known_args()
-    if args.tf != "":
-        args.file = args.tf
-    if args.tk != 2.0:
-        args.k = args.tk
-    return args
 
 
-def main():
-    args = parse_args()
-    dataPath = args.file
-    fracK = math.ceil(args.k * 100) / 100.0  # math.ceil(args.k * 100) 括号别错了
-
-    print("---------------------------------------------------")
-    if args.re == 1:
-        raise NotImplementedError("ReOne Class")
-        # graph = ReOne(dataPath, outputfolder, fracK, seed, use_fast_topndrop)
-    else:
-        graph = SSumM(dataPath, args.out, fracK, args.seed, args.use_fast_topndrop, args.urd, args.useNE)
-    graph.inputGraph()
-    elapsTime = graph.Summarize(args.T, args.cals)
-    if args.sidx == 0:
-        graph.summarySave_initid()
-    else:
-        graph.summarySave_newidx()
-
-    originalSize = 2 * graph.numEdges * math.log2(graph.numNodes)
-    summarySize = graph.numNodes * math.log2(graph.numSuperNodes) + graph.numSuperEdges * (
-            2 * math.log2(graph.numSuperNodes) + math.log2(graph.maxWeight))
-    print("---------------------------------------------------")
-    for key, value in dict(args._get_kwargs()).items():
-        print(f"{key}: {value}", end=";  ")
-    print("\n---------------------------------------------------")
-    print(f"Dataset Name:   {graph.dataset_name}    fracK:   {fracK}")
-    print(
-        f"Summary size:   {originalSize:.2f} bits  -->  {summarySize:.2f} bits ({100 * summarySize / originalSize:.6f}%)")
-    print(f"|V|:  {graph.numNodes}  |E|:  {graph.numEdges}  |S|:  {graph.numSuperNodes}  |P|:  {graph.numSuperEdges}")
-    print(f"Elapsed Time:   {elapsTime} s")
-    REDSTR = ['\033[91m', '\033[0m']
-    print(f"L{args.re}error:   {REDSTR[0]}{graph.norm()[1]:.4e}{REDSTR[1]}")  # flag main
-
-    # if graph.debug:
-    #     print(graph.removed_node)
 
 
-if __name__ == "__main__":
-    main()

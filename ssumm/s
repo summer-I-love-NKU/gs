@@ -1,21 +1,13 @@
 set -x
 
+if      [ ${1} = 'start' ]; then
+    python 1.py
+
+elif      [ ${1} = '1' ]; then
+    python main.py -file   ../dataset/email_eu.txt       ${2}
+
+elif    [ ${1} = 't' ]; then
+    tensorboard --logdir=/Users/shen/Desktop/log --port 8123 --host=127.0.0.1
+fi
 
 
-
-
-python SSumM.py --data=email_eu  --k=${1}  --useNE=${2}  --NEmodel=${3}
-
-
-
-
-# ###################################
-
-# python SSumM.py --data=email_eu  --k=0.5  --useNE=1  --NEmodel=gcncd
-
-
-exit
-for x in $(seq 1 1 9)
-do
-python SSumM.py --dataPath=./dataset/fb.txt --k=0.${x} --useNE=${1}
-done
