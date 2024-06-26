@@ -7,4 +7,7 @@
 
 
 email_eu数据集
+
+
+
 为什么entropy函数会出现p>=1 ??? 之前weight计算有误？
